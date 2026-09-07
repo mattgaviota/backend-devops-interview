@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backend-devops-interview
+  namespace: default
+data:
+  # Cloud SQL Auth Proxy runs as a sidecar on loopback — the app sees Postgres on localhost.
+  DATABASE_HOST: "127.0.0.1"
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: "backend_devops_interview"
+  DATABASE_USER: "postgres"
+  ALLOWED_HOSTS: "api.example.com"   # Replace with your actual domain

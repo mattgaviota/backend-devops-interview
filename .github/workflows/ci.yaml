@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  REGION: us-central1                      # Artifact Registry region
+  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}   # Set in repo → Settings → Variables
+  AR_REPO: backend-devops-interview        # Artifact Registry repository name
+  IMAGE: backend-devops-interview
+  GKE_CLUSTER: ${{ vars.GKE_CLUSTER }}     # Set in repo → Settings → Variables
+  GKE_REGION: ${{ vars.GKE_REGION }}       # Set in repo → Settings → Variables
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: backend_devops_interview
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.14"
+
+      - run: uv sync
+
+      - name: Run tests
+        run: uv run pytest
+        env:
+          DATABASE_HOST: localhost
+          DATABASE_USER: postgres
+          DATABASE_PASSWORD: postgres
+          DATABASE_NAME: backend_devops_interview
+          SECRET_KEY: ci-insecure-key
+
+  build-and-push:
+    needs: test
+    # Only push images on merges to main, not on PRs.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # Required for Workload Identity Federation
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keyless auth — no service account key file stored in GitHub.
+      # Configure once: https://cloud.google.com/iam/docs/workload-identity-federation-with-other-providers
+      # Then add to repo secrets:
+      #   WIF_PROVIDER  — e.g. projects/123/locations/global/workloadIdentityPools/github/providers/github
+      #   WIF_SERVICE_ACCOUNT — e.g. ci-pusher@PROJECT_ID.iam.gserviceaccount.com
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # Tag with the full git SHA for traceability and rollback,
+          # plus `latest` as a convenience alias.
+          tags: |
+            ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Get GKE credentials
+        uses: google-github-actions/get-gke-credentials@v2
+        with:
+          cluster_name: ${{ env.GKE_CLUSTER }}
+          location: ${{ env.GKE_REGION }}
+
+      - name: Deploy
+        run: |
+          IMAGE="${{ env.REGION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.AR_REPO }}/${{ env.IMAGE }}:${{ github.sha }}"
+          kubectl set image deployment/backend-devops-interview \
+            migrate="${IMAGE}" \
+            app="${IMAGE}"
+          kubectl rollout status deployment/backend-devops-interview --timeout=5m

@@ -21,6 +21,9 @@ services:
       - "8000:8000"
     environment:
       DATABASE_HOST: db
+      DEBUG: "true"
+      SECRET_KEY: "django-insecure-9!^p2zr8m=k$d3v0&xq+1wybho4ag&7lcfu+ej(nti6r%h@m4s"
+      ALLOWED_HOSTS: "*"
     volumes:
       - .:/app
     depends_on:

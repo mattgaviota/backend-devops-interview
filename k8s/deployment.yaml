@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-devops-interview
+  namespace: default
+  labels:
+    app: backend-devops-interview
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: backend-devops-interview
+  template:
+    metadata:
+      labels:
+        app: backend-devops-interview
+    spec:
+      serviceAccountName: backend-devops-interview
+
+      # Run migrations before the app starts.
+      # Note: if you deploy multiple replicas simultaneously all init containers will
+      # attempt to migrate concurrently — Django's migration executor is safe here
+      # (it uses advisory locks), but consider a pre-deploy Job for stricter control.
+      initContainers:
+        - name: migrate
+          # Replace IMAGE_TAG with the git SHA produced by the CI pipeline.
+          image: REGION-docker.pkg.dev/PROJECT_ID/REPO/backend-devops-interview:IMAGE_TAG
+          command: ["uv", "run", "python", "manage.py", "migrate", "--noinput"]
+          envFrom:
+            - configMapRef:
+                name: backend-devops-interview
+            - secretRef:
+                name: backend-devops-interview
+        - name: cloud-sql-proxy-init
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2
+          args:
+            - "--structured-logs"
+            - "--port=5432"
+            - "--exit-zero-on-sigterm"
+            - "PROJECT_ID:REGION:INSTANCE_NAME"
+          securityContext:
+            runAsNonRoot: true
+
+      containers:
+        - name: app
+          image: REGION-docker.pkg.dev/PROJECT_ID/REPO/backend-devops-interview:IMAGE_TAG
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: backend-devops-interview
+            - secretRef:
+                name: backend-devops-interview
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 1
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+        # Cloud SQL Auth Proxy — authenticates to Cloud SQL via Workload Identity
+        # and exposes the instance on 127.0.0.1:5432 inside the pod.
+        - name: cloud-sql-proxy
+          image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2
+          args:
+            - "--structured-logs"
+            - "--port=5432"
+            - "PROJECT_ID:REGION:INSTANCE_NAME"
+          securityContext:
+            runAsNonRoot: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi

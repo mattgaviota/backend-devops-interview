@@ -52,11 +52,55 @@ Result: a page of 20 posts now costs **2 queries** (posts+author JOIN, tags batc
 
 **Trade-off noted:** The GIN index is updated on every `INSERT`/`UPDATE` to `Post` — acceptable for a write-light content service, but worth monitoring on heavy write workloads.
 
+### 4. Production readiness — environment-driven settings
+
+**Problem:** `SECRET_KEY`, `DEBUG`, and `ALLOWED_HOSTS` were hardcoded. Shipping the insecure key or running with `DEBUG=True` in production leaks stack traces and disables security middleware.
+
+**What I changed (`core/settings.py`):**
+
+- `SECRET_KEY` — reads from env, falls back to the insecure placeholder so local dev without Docker still works out of the box.
+- `DEBUG` — reads `DEBUG` env var, parsed as a boolean (`"true"` → `True`). Defaults to `False` — safe by default.
+- `ALLOWED_HOSTS` — reads a comma-separated `ALLOWED_HOSTS` env var (e.g. `"api.example.com,www.example.com"`). Defaults to `"*"`.
+
+`docker-compose.yml` explicitly sets `DEBUG=true`, the dev secret key, and `ALLOWED_HOSTS=*` so the dev environment is self-documenting — a new team member can see exactly what a production deployment needs to override.
+
+### 5. Production readiness — health endpoint, Kubernetes manifests, CI pipeline
+
+**Health endpoint (`core/urls.py`):**
+
+Added `GET /health` as a plain Django view outside the Ninja API. It pings the DB with `connection.ensure_connection()` and returns `{"status": "ok"}` (200) or `{"status": "error", "database": "unavailable"}` (503). Being outside Ninja means it responds even if something in the API layer is broken — it's the right scope for liveness and readiness probes.
+
+**Kubernetes manifests (`k8s/`):**
+
+Assumes GKE + Cloud SQL (Postgres) + nginx-ingress controller.
+
+- `configmap.yaml` — non-sensitive config: DB name, user, host (`127.0.0.1` because the Cloud SQL proxy runs as a sidecar), `ALLOWED_HOSTS`.
+- `secret.yaml.example` — template only; real values are never committed. Instructions to create the Secret via `kubectl` or a secrets operator.
+- `serviceaccount.yaml` — K8s ServiceAccount annotated for Workload Identity, bound to a GCP Service Account with `roles/cloudsql.client`. No key files anywhere.
+- `deployment.yaml` — 2 replicas, Cloud SQL Auth Proxy as a sidecar (authenticates via Workload Identity), liveness and readiness probes on `/health`, resource requests/limits set. Migrations run in an init container before the app starts.
+- `service.yaml` — ClusterIP, port 80 → 8000.
+- `ingress.yaml` — nginx Ingress, host-based routing.
+
+**GitHub Actions (`.github/workflows/ci.yaml`):**
+
+- Runs on every push and PR against `main`.
+- `test` job spins up a Postgres service container and runs `pytest`.
+- `build-and-push` job runs only on merges to `main` (skipped on PRs).
+- Authentication uses Workload Identity Federation — no service account key file stored in GitHub secrets.
+- Image pushed to Artifact Registry tagged with `github.sha` (for traceability and rollback) and `latest`.
+- Layer cache shared via GitHub Actions cache (`cache-from/cache-to: type=gha`) to keep build times short.
+
+**What to set in the repo before the pipeline works:**
+- Repo variable `GCP_PROJECT_ID`
+- Repo secrets `WIF_PROVIDER` and `WIF_SERVICE_ACCOUNT`
+- Replace all `PROJECT_ID`, `REGION`, `INSTANCE_NAME`, `REPO` placeholders in the manifests
+- Replace `api.example.com` with your actual domain in `configmap.yaml` and `ingress.yaml`
+
 ## What I'd do next
 
-- **`get_post` comments N+1** — fetching a post with many comments still fires one query per comment author. `select_related` on the comments queryset would fix it.
 - **`create_post` tag loop** — `Tag.objects.get(slug=slug)` in a for-loop is N queries; `Tag.objects.filter(slug__in=payload.tag_slugs)` would be 1.
-- **Production readiness** — Promote `SECRET_KEY`, `DEBUG`, `ALLOWED_HOSTS` to env vars; add a `/health` endpoint.
+- **HPA** — add a HorizontalPodAutoscaler targeting ~70% CPU to handle traffic spikes without over-provisioning.
+- **TLS** — add `cert-manager` + a `ClusterIssuer` to provision Let's Encrypt certs automatically for the Ingress.
 
 ---
 
