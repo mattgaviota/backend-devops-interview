@@ -1,4 +1,5 @@
-from django.db.models import Q
+from django.contrib.postgres.search import SearchQuery, SearchVector
+from django.db.models import F, Q
 from django.shortcuts import get_object_or_404
 from ninja import Router
 
@@ -40,32 +41,46 @@ def _serialize_post_list(post: Post) -> dict:
 
 
 @router.get("/posts", response=list[PostListOut])
-def list_posts(request):
-    posts = Post.objects.filter(is_published=True).order_by("-created_at")
+def list_posts(request, limit: int = 20, offset: int = 0):
+    posts = (
+        Post.objects.filter(is_published=True)
+        .select_related("author")
+        .prefetch_related("tags")
+        .order_by("-created_at")[offset : offset + limit]
+    )
     return [_serialize_post_list(p) for p in posts]
 
 
 @router.get("/posts/search", response=list[PostListOut])
-def search_posts(request, q: str):
-    posts = Post.objects.filter(
-        Q(title__icontains=q) | Q(body__icontains=q),
-        is_published=True,
-    ).order_by("-created_at")
+def search_posts(request, q: str, limit: int = 20, offset: int = 0):
+    posts = (
+        Post.objects.filter(is_published=True)
+        .annotate(search=SearchVector("title", "body", config="english"))
+        .filter(search=SearchQuery(q, config="english"))
+        .select_related("author")
+        .prefetch_related("tags")
+        .order_by("-created_at")[offset : offset + limit]
+    )
     return [_serialize_post_list(p) for p in posts]
 
 
 @router.get("/posts/by-tag/{slug}", response=list[PostListOut])
-def posts_by_tag(request, slug: str):
+def posts_by_tag(request, slug: str, limit: int = 20, offset: int = 0):
     tag = get_object_or_404(Tag, slug=slug)
-    posts = tag.posts.filter(is_published=True).order_by("-created_at")
+    posts = (
+        tag.posts.filter(is_published=True)
+        .select_related("author")
+        .prefetch_related("tags")
+        .order_by("-created_at")[offset : offset + limit]
+    )
     return [_serialize_post_list(p) for p in posts]
 
 
 @router.get("/posts/{post_id}", response=PostDetailOut)
 def get_post(request, post_id: int):
     post = get_object_or_404(Post, id=post_id)
-    post.view_count += 1
-    post.save()
+    Post.objects.filter(id=post_id).update(view_count=F("view_count") + 1)
+    post.refresh_from_db(fields=["view_count"])
 
     comments = [
         {
@@ -74,7 +89,7 @@ def get_post(request, post_id: int):
             "body": c.body,
             "created_at": c.created_at,
         }
-        for c in post.comments.order_by("created_at")
+        for c in post.comments.select_related("author").order_by("created_at")
     ]
     return {
         "id": post.id,

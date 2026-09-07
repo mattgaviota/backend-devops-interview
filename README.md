@@ -4,12 +4,28 @@ A small content service: users, posts, comments, tags. Django + Ninja + Postgres
 
 ## Running it locally
 
+### With Docker (recommended)
+
+Prereqs: Docker with the Compose plugin (`docker compose version`).
+
+```sh
+docker compose up --build
+```
+
+The app service runs migrations automatically on startup. API docs at <http://localhost:8000/api/docs>.
+
+To seed the database (writes ~100k posts and ~500k comments — takes a few minutes):
+
+```sh
+docker compose exec app uv run python manage.py seed
+```
+
+### Without Docker
+
 Prereqs:
 
 - [mise](https://mise.jdx.dev/) — manages the Python toolchain and uv.
-- A running PostgreSQL 16 instance on `localhost:5432` with a database called `backend_devops_interview` accessible to `postgres`/`postgres`. (Local install, `brew install postgresql@16`, host-mode docker, whatever you have.)
-
-Steps:
+- A running PostgreSQL 16 instance on `localhost:5432` with a database called `backend_devops_interview` accessible to `postgres`/`postgres`.
 
 ```sh
 mise install
@@ -21,8 +37,6 @@ uv run python manage.py runserver
 ```
 
 API docs at <http://localhost:8000/api/docs>.
-
-Seeding writes ~100k posts and ~500k comments. Expect a few minutes.
 
 ## What the API does
 

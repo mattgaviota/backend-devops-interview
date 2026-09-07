@@ -1,10 +1,13 @@
+from django.contrib.postgres.indexes import GinIndex
+from django.contrib.postgres.search import SearchVector
 from django.db import models
+from django.db.models import Index, Q
 from django.utils import timezone
 
 
 class User(models.Model):
     username = models.CharField(max_length=64, unique=True)
-    email = models.CharField(max_length=255)
+    email = models.CharField(max_length=255, db_index=True)
     display_name = models.CharField(max_length=128)
     bio = models.TextField(blank=True)
     created_at = models.DateTimeField(default=timezone.now)
@@ -34,6 +37,22 @@ class Post(models.Model):
 
     def __str__(self) -> str:
         return self.title
+
+    class Meta:
+        indexes = [
+            # Partial index covering only published posts — smaller and faster than a
+            # full composite index because every public list query filters is_published=True.
+            Index(
+                fields=["-created_at"],
+                condition=Q(is_published=True),
+                name="post_published_created_idx",
+            ),
+            # GIN index on a tsvector expression over title + body for full-text search.
+            GinIndex(
+                SearchVector("title", "body", config="english"),
+                name="post_fts_gin",
+            ),
+        ]
 
 
 class Comment(models.Model):

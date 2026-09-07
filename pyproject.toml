@@ -8,6 +8,8 @@ dependencies = [
     "django-ninja>=1.5,<2",
     "psycopg[binary]>=3.3,<4",
     "faker>=30",
+    "uvicorn[standard]>=0.30",
+    "gunicorn>=22",
 ]
 
 [dependency-groups]
